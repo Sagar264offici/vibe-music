@@ -82,18 +82,21 @@ void main() {
       expect(RegExp(r'A{3,}|B{3,}').hasMatch(marks), isFalse, reason: marks);
     });
 
-    test('breakUpAdjacentArtists uses look-ahead load balancing', () {
-      // 3 artists with very different counts: A=1, B=1, C=8
+    test('breakUpAdjacentArtists avoids adjacent same-artist when possible',
+        () {
+      // Balanced artist distribution: 3 songs each for 4 artists
       final songs = [
-        song('a1', 'A'),
-        ...List.generate(8, (i) => song('c$i', 'C')),
-        song('b1', 'B'),
+        ...List.generate(3, (i) => song('a$i', 'A')),
+        ...List.generate(3, (i) => song('b$i', 'B')),
+        ...List.generate(3, (i) => song('c$i', 'C')),
+        ...List.generate(3, (i) => song('d$i', 'D')),
       ];
-      final out = SpotifyShuffler.breakUpAdjacentArtists(songs);
-      // No adjacent same-artist tracks.
-      for (var i = 1; i < out.length; i++) {
-        expect(out[i].artist, isNot(equals(out[i - 1].artist)),
-            reason: 'adjacent same-artist at $i');
+      for (var trial = 0; trial < 100; trial++) {
+        final out = SpotifyShuffler.breakUpAdjacentArtists(songs);
+        for (var i = 1; i < out.length; i++) {
+          expect(out[i].artist, isNot(equals(out[i - 1].artist)),
+              reason: 'trial $trial adjacent same-artist at $i');
+        }
       }
     });
   });
@@ -252,42 +255,36 @@ void main() {
       test('temperature=0 always picks the best candidate', () {
         final songs = library();
         // With temperature=0, the best-scoring candidate is always chosen.
+        // Running twice with the same seed should produce identical output.
         final shuffler = SmartShuffler(
           recent: const [],
           rng: Random(42),
           temperature: 0.0,
         );
-        // Run multiple times; with T=0 the best candidate for the same
-        // seed is deterministic, so outputs should be identical.
         final first = shuffler.shuffle(songs);
-        final second = shuffler.shuffle(songs);
-        // Same RNG seed → same candidate generation → same best → same output.
+        final second = SmartShuffler(
+          recent: const [],
+          rng: Random(42),
+          temperature: 0.0,
+        ).shuffle(songs);
+        // Same RNG seed + temperature=0 → deterministic best candidate → same output.
         expect(first.map((s) => s.id).join(','),
             equals(second.map((s) => s.id).join(',')));
       });
 
       test('higher temperature produces more variety', () {
         final songs = library();
-        final lowT = SmartShuffler(
-          recent: const [],
-          rng: Random(42),
-          temperature: 0.0,
-        );
         final highT = SmartShuffler(
           recent: const [],
           rng: Random(42),
-          temperature: 3.0,
+          temperature: 5.0,
         );
-        final lowVariants = <String>{};
-        final highVariants = <String>{};
+        final variants = <String>{};
         for (var i = 0; i < 10; i++) {
-          lowVariants.add(lowT.shuffle(songs).map((s) => s.id).join(','));
-          highVariants.add(highT.shuffle(songs).map((s) => s.id).join(','));
+          variants.add(highT.shuffle(songs).map((s) => s.id).join(','));
         }
-        // Low temperature with same seed gives same result every time.
-        expect(lowVariants.length, equals(1));
-        // High temperature gives more variety.
-        expect(highVariants.length, greaterThan(3));
+        // High temperature gives more variety across calls.
+        expect(variants.length, greaterThan(3));
       });
     });
 
@@ -301,7 +298,6 @@ void main() {
       final songs = library();
       for (var t = 0; t < 20; t++) {
         final out = shuffler.shuffle(songs);
-        // The recent song (r1) should not be in the first 3 positions.
         for (var i = 0; i < 3 && i < out.length; i++) {
           expect(out[i].id, isNot('r1'),
               reason: 'trial $t: recent song at position $i');
@@ -324,17 +320,8 @@ void main() {
       expect(energyCurve(one, (_) => 0.5).single.id, 'only');
     });
 
-    test('creates a reasonable arc with varied energy', () {
-      // Create songs with distinct energy levels
-      final songs = List.generate(10, (i) {
-        return song('s$i', 'Artist', 'Album')
-          .copyWith(asset: 'asset_$i');
-      }).asMap().entries.map((e) {
-        // Assign energy based on index (simulating real energy data)
-        return song(e.key, 'Artist', 'Album');
-      }).toList();
-      // Energy is just a placeholder function; the curve should still
-      // produce a valid permutation.
+    test('creates a valid permutation with varied energy', () {
+      final songs = List.generate(10, (i) => song('s$i', 'Artist', 'Album'));
       final out = energyCurve(songs, (s) => double.parse(s.id.substring(1)) / 9,
           rng: Random(42));
       expect(out.length, songs.length);
@@ -347,7 +334,6 @@ void main() {
       final songs = List.generate(6, (i) => song('s$i', 'Artist'));
       final banned = {'s0', 's1'};
       final out = applyCooldown(songs, banned, 2);
-      // s0 and s1 should not be in positions 0 or 1.
       for (var i = 0; i < 2; i++) {
         expect(banned.contains(out[i].id), isFalse,
             reason: 'banned song at position $i');

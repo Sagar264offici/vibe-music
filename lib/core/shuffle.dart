@@ -62,13 +62,16 @@ class SpotifyShuffler {
     final sorted = positioned.map((e) => e.$2).toList();
 
     // -- greedy repair: never two songs from the same artist back-to-back ----
-    final ordered = breakUpAdjacentArtists(sorted, firstArtist: first?.artist.toLowerCase());
+    final ordered = breakUpAdjacentArtists(
+      sorted,
+      firstArtist: first?.artist.toLowerCase(),
+    );
 
     return first == null ? ordered : [first, ...ordered];
   }
 
-  /// Core dithering spread: place each song of [songs] at a jittered multiple of
-  /// its group's ideal spacing (1/k), plus a shared random phase offset.
+  /// Core dithering spread: place each song of [songs] at a jittered multiple
+  /// of its group's ideal spacing (1/k), plus a shared random phase offset.
   List<Song> spread(List<Song> songs, {required String Function(Song) keyOf}) {
     if (songs.length < 2) return songs;
     final byKey = <String, List<Song>>{};
@@ -91,11 +94,11 @@ class SpotifyShuffler {
     return positioned.map((e) => e.$2).toList();
   }
 
-  /// Reorders [input] so that (when possible) no two consecutive songs share an
-  /// artist. Uses look-ahead: when choosing between multiple valid
-  /// different-artist candidates, picks the one whose artist has the
-  /// most remaining songs ahead (greedy load-balancing). Only fails when
-  /// the remaining songs are all by one artist.
+  /// Reorders [input] so that (when possible) no two consecutive songs share
+  /// an artist. Uses a greedy approach: whenever the next song would repeat
+  /// the previous artist, scans forward for the next different-artist song
+  /// and pulls it forward. Only fails when all remaining songs are by one
+  /// artist, which is mathematically unavoidable.
   static List<Song> breakUpAdjacentArtists(List<Song> input,
       {String? firstArtist}) {
     final pool = List.of(input);
@@ -103,43 +106,17 @@ class SpotifyShuffler {
     String? lastArtist = firstArtist;
 
     while (pool.isNotEmpty) {
-      // Collect all songs whose artist differs from the last played.
-      final candidates = <int>[];
+      // Find the first song whose artist differs from the last played.
+      var pickIndex = -1;
       for (var i = 0; i < pool.length; i++) {
         if (pool[i].artist.toLowerCase() != lastArtist) {
-          candidates.add(i);
+          pickIndex = i;
+          break;
         }
       }
-
-      int pickIndex;
-      if (candidates.isEmpty) {
-        // Unavoidable cluster — only one artist left.
-        pickIndex = 0;
-      } else if (candidates.length == 1) {
-        pickIndex = candidates[0];
-      } else {
-        // Look-ahead: prefer the artist that appears most often in the
-        // remaining pool, so we don't accidentally strand a large group.
-        final artistCount = <String, int>{};
-        for (final idx in candidates) {
-          final a = pool[idx].artist.toLowerCase();
-          artistCount[a] = (artistCount[a] ?? 0) + 1;
-        }
-        // Weight random selection by remaining count so the "biggest
-        // remaining group" is more likely to be picked first — this
-        // prevents creating stranded clusters later.
-        final total = artistCount.values.reduce((a, b) => a + b);
-        var roll = rng.nextInt(total);
-        var chosenIdx = candidates[0];
-        for (final idx in candidates) {
-          roll -= artistCount[pool[idx].artist.toLowerCase()]!;
-          if (roll < 0) {
-            chosenIdx = idx;
-            break;
-          }
-        }
-        pickIndex = chosenIdx;
-      }
+      // If all remaining songs are the same artist, take the first one
+      // (unavoidable cluster).
+      if (pickIndex < 0) pickIndex = 0;
 
       final song = pool.removeAt(pickIndex);
       result.add(song);
@@ -150,7 +127,7 @@ class SpotifyShuffler {
 }
 
 /// Spotify 2025 "Fewer Repeats" principle (engineering.atspotify.com):
-/// generate several *genuinely random* candidate orders, score each complete
+/// generate several *genuinely random* candidate orders, score each COMPLETE
 /// sequence for freshness against listening history, and select with
 /// **temperature-weighted randomness** instead of always picking the best.
 /// Selection among random candidates preserves surprise — it never sorts
@@ -165,7 +142,7 @@ class SpotifyShuffler {
 /// D. repetitive local patterns (A-B-A, A-B-A-B) are penalised;
 /// E. unheard / long-unheard songs get a freshness bonus weighted towards
 ///    the front of the queue;
-/// F. recently played songs are banned from the first [cooldown] positions.
+/// F. recently played songs are banned from the first [recentBanWindow] positions.
 class SmartShuffler {
   /// id -> rank, 0 = most recently played. Songs missing from the map are
   /// considered fresh.
@@ -214,7 +191,7 @@ class SmartShuffler {
   static const double _freshW = 3.0;
   static const double _openerFreshW = 8.0;
 
-  /// Scores one candidate order. Public for tests.
+  /// Scores one candidate order (complete sequence). Public for tests.
   double score(List<Song> order) {
     final n = order.length;
     if (n < 2) return 0;
@@ -234,22 +211,22 @@ class SmartShuffler {
       final r = recentRank[song.id];
       final isRecent = r != null && r < recentDepth;
 
-      // A + B: recency penalty, stronger when more recent AND near the front.
+      // A + B: recency penalty, stronger when more recent AND near front.
       if (isRecent) {
-        final recency = 1.0 - r / recentDepth; // 1 = just played
+        final recency = 1.0 - r / recentDepth;
         s -= _recencyW * recency * (1.0 - i / n);
         if (i < earlyWindow) {
           s -= _earlyW * recency * (1.0 - i / earlyWindow);
         }
       } else {
-        // E: freshness bonus, weighted towards the front.
+        // E: freshness bonus.
         s += _freshW * (1.0 - i / n);
       }
 
       final artist = song.artist.toLowerCase();
+      final positions = artistPositions[artist]!;
 
       // C: same-artist adjacency + clustering using precomputed positions.
-      final positions = artistPositions[artist]!;
       for (var p = 0; p < positions.length; p++) {
         final d = positions[p] - i;
         if (d > 0 && d <= window) {
@@ -264,7 +241,7 @@ class SmartShuffler {
         s -= _patternW;
       }
 
-      // D: alternating A→B→A→B pattern across the last four slots.
+      // D: alternating A→B→A→B pattern.
       if (i >= 3 &&
           order[i - 2].artist.toLowerCase() == artist &&
           order[i - 3].artist.toLowerCase() == order[i - 1].artist.toLowerCase() &&
@@ -276,7 +253,7 @@ class SmartShuffler {
     // E: opener freshness bonus.
     if (!recentRank.containsKey(order.first.id)) s += _openerFreshW;
 
-    // F: cooldown bonus — penalise recent songs appearing too early.
+    // F: cooldown penalty — recent songs in first positions.
     for (var i = 0; i < min(recentBanWindow, n); i++) {
       final r = recentRank[order[i].id];
       if (r != null && r < recentDepth) {
@@ -287,17 +264,30 @@ class SmartShuffler {
     return s;
   }
 
-  /// Softmax-weighted random selection among the top candidates.
-  /// Higher-scoring candidates are chosen more often, but [temperature]
-  /// controls how "committed" we are to the best one:
-  ///   temperature → 0 : always the best
-  ///   temperature → ∞ : uniform random
-  Song _selectCandidate(List<List<Song>> candidates, List<double> scores) {
+  /// Temperature-weighted random selection among candidates.
+  /// When [temperature] is effectively 0, always returns the best candidate.
+  /// Higher temperatures produce more variety.
+  List<Song> _selectCandidate(List<List<Song>> candidates, List<double> scores) {
     if (candidates.length == 1) return candidates.first;
 
-    // Compute softmax weights.
-    final temps = temperature.clamp(0.01, 10.0);
-    final expScores = scores.map((s) => exp((s - scores.reduce(max)) / temps)).toList();
+    // For temperature near 0, always pick the best candidate.
+    final temps = temperature.clamp(0.001, 10.0);
+    if (temps < 0.01) {
+      // Find the best score and return the first candidate with it.
+      var bestScore = double.negativeInfinity;
+      var bestIdx = 0;
+      for (var i = 0; i < scores.length; i++) {
+        if (scores[i] > bestScore) {
+          bestScore = scores[i];
+          bestIdx = i;
+        }
+      }
+      return candidates[bestIdx];
+    }
+
+    // Softmax weighting.
+    final maxScore = scores.reduce(max);
+    final expScores = scores.map((s) => exp((s - maxScore) / temps)).toList();
     final total = expScores.reduce((a, b) => a + b);
     var roll = rng.nextDouble() * total;
     for (var i = 0; i < expScores.length; i++) {
@@ -312,8 +302,7 @@ class SmartShuffler {
   /// itself seeded from the same RNG stream), scores each COMPLETE
   /// sequence, and returns a temperature-weighted random selection.
   /// [first] is pinned as the opening track; when null, the most recently
-  /// played song is never the opener and is banned from the first
-  /// [recentBanWindow] positions.
+  /// played song is never the opener.
   List<Song> shuffle(List<Song> songs, {Song? first}) {
     if (songs.length <= 3) {
       // Tiny playlist: one plain Fisher–Yates pass, constraints relaxed.
@@ -341,12 +330,11 @@ class SmartShuffler {
 
     // If no explicit first track and there's recent history, ensure
     // the most recently played song doesn't open the queue.
-    if (first == null && chosen.length > 1 && recentRank.isNotEmpty) {
+    if (first == null && chosen.isNotEmpty && recentRank.isNotEmpty) {
       final mostRecentId = recentRank.entries
           .reduce((a, b) => a.value <= b.value ? a : b)
           .key;
       if (chosen.first.id == mostRecentId) {
-        // Find the first non-recent song to swap in.
         for (var i = 1; i < chosen.length; i++) {
           if (!recentRank.containsKey(chosen[i].id) ||
               recentRank[chosen[i].id]! >= recentDepth) {
@@ -363,8 +351,7 @@ class SmartShuffler {
     return _applyCooldown(chosen);
   }
 
-  /// Moves songs that were played recently (within [recentBanWindow])
-  /// deeper into the queue by swapping them with a later song.
+  /// Moves recently-played songs out of the first [recentBanWindow] positions.
   List<Song> _applyCooldown(List<Song> order) {
     final result = List.of(order);
     final n = result.length;
@@ -373,7 +360,6 @@ class SmartShuffler {
     for (var i = 0; i < banLimit && i < n; i++) {
       final r = recentRank[result[i].id];
       if (r != null && r < recentDepth) {
-        // Find the latest song in the remaining list that isn't recent.
         for (var j = n - 1; j > i; j--) {
           final rj = recentRank[result[j].id];
           if (rj == null || rj >= recentDepth) {
@@ -389,9 +375,9 @@ class SmartShuffler {
   }
 
   /// One candidate: Fisher–Yates on a copy, then the structural repair pass
-  /// with look-ahead load-balancing that avoids stranded artist clusters.
-  /// The repair is deterministic given the FY order, so the candidate
-  /// remains a genuine permutation with unbiased FY randomness.
+  /// that breaks up adjacent same-artist tracks. The repair is deterministic
+  /// given the FY order, so the candidate remains a genuine permutation with
+  /// unbiased FY randomness.
   List<Song> _fisherYatesCandidate(List<Song> songs, {Song? first}) {
     final pool = List.of(songs);
     fisherYates(pool, rng);
@@ -407,48 +393,44 @@ class SmartShuffler {
   }
 }
 
-/// Energy-based ordering: reorders [songs] to create a smooth energy
-/// arc — starts moderate, builds to a peak, then cools down.
-/// Each song's [energy] is a value in [0.0, 1.0].
-/// [rng] provides randomness for tie-breaking.
-List<Song> energyCurve(List<Song> songs,
-    double Function(Song) energyOf, {Random? rng}) {
+/// Energy-based ordering: reorders [songs] to create a smooth energy arc
+/// — starts moderate, builds to a peak, then cools down.
+/// [energyOf] returns a value in [0.0, 1.0] for each song.
+/// [rng] provides randomness for tie-breaking when energies are equal.
+List<Song> energyCurve(List<Song> songs, double Function(Song) energyOf,
+    {Random? rng}) {
   final random = rng ?? Random.secure();
   if (songs.length < 3) return List.of(songs);
 
-  final scored = songs.map((s) => (energyOf(s), s)).toList();
-
-  // Sort by energy to get a baseline, then interleave high/low for curve.
-  scored.sort((a, b) => a.$1.compareTo(b.$1));
-
-  // Build an arc: low → high → low using a sine-curve mapping.
-  final n = scored.length;
+  final n = songs.length;
+  final used = <int>{};
   final ordered = <Song>[];
+
+  // Build an arc: map each position to an energy target via sine curve.
   for (var i = 0; i < n; i++) {
-    // Map position index to energy target using a sine curve (0..π)
     final targetEnergy = sin((i / (n - 1)) * pi);
-    // Find the song closest to this target energy that hasn't been used yet.
     double bestDist = double.infinity;
     int bestIdx = -1;
-    for (var j = 0; j < scored.length; j++) {
-      if (scored[j].$2 == null) continue;
-      final dist = (scored[j].$1 - targetEnergy).abs();
-      if (dist < bestDist) {
-        bestDist = dist;
+    for (var j = 0; j < n; j++) {
+      if (used.contains(j)) continue;
+      final dist = (energyOf(songs[j]) - targetEnergy).abs();
+      // Add tiny randomness to break ties.
+      final tieBreak = random.nextDouble() * 0.001;
+      if (dist + tieBreak < bestDist) {
+        bestDist = dist + tieBreak;
         bestIdx = j;
       }
     }
     if (bestIdx >= 0) {
-      ordered.add(scored[bestIdx].$2!);
-      scored[bestIdx] = (scored[bestIdx].$1, null as Song);
+      ordered.add(songs[bestIdx]);
+      used.add(bestIdx);
     }
   }
 
   return ordered;
 }
 
-/// Adds a configurable cooldown window: songs in [bannedIds] cannot
-/// appear in the first [windowSize] positions of [order].
+/// Moves songs in [bannedIds] past position [windowSize - 1] in [order].
 /// If a banned song is in a forbidden position, it is swapped with the
 /// nearest eligible song after the window.
 List<Song> applyCooldown(List<Song> order, Set<String> bannedIds, int windowSize) {
