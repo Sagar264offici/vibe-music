@@ -1,0 +1,32 @@
+name: vibe_music
+description: "Vibe — a beautiful, fast music player with Spotify-style shuffle and synced lyrics."
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.9.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  just_audio: ^0.10.6
+  just_audio_background: ^0.0.1-beta.17
+  audio_service: ^0.18.19
+  audio_session: ^0.2.2
+  http: ^1.6.0
+  crypto: ^3.0.7
+  shared_preferences: ^2.5.5
+  xml: ^6.5.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
+  flutter_native_splash: ^2.4.6
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/icons/logo_mark.png
